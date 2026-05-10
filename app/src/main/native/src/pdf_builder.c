@@ -5,7 +5,7 @@
  * ObjTable (xref 用オフセット配列) だけメモリに保持する。
  */
 
-#include "../include/pdf_builder.h"
+#include "pdf_builder.h"
 
 #include <assert.h>
 #include <stdarg.h>
@@ -143,9 +143,9 @@ static uint8_t* convert_pixels(
                 uint8_t ch_val;
                 if (dst_ch == 1) {
                     /* ITU-R BT.709 輝度 (整数演算) */
-                    uint32_t lum = (uint32_t) r * 2126u
-                                   + (uint32_t) g * 7152u
-                                   + (uint32_t) b * 722u;
+                    uint32_t lum = (uint32_t) r * 213u
+                                   + (uint32_t) g * 715u
+                                   + (uint32_t) b * 72u;
                     ch_val = (uint8_t)((lum + 500u) / 1000u);
                 } else {
                     ch_val = (c == 0) ? r : (c == 1) ? g : b;

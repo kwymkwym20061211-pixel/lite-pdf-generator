@@ -2,7 +2,7 @@
  * pdf_builder_jni.c  (v2)
  *
  * Java シグネチャ (パッケージ名は適宜変更):
- *   com.example.boardshot.PdfBuilder
+ *   light.pdf.generator.kulupu.PdfBuilder
  *
  * Java 側の宣言:
  *   private native long   nativeStart(String rootPath, String fileName);
@@ -16,15 +16,15 @@
  *   private native void   nativeAbort(long ctx);
  */
 
-#include "../include/pdf_builder.h"
-#include "../include/vfs.h"
+#include "pdf_builder.h"
+#include "vfs.h"
 
 #include <jni.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define JNI_METHOD(name) \
-    Java_com_example_boardshot_PdfBuilder_##name
+    Java_light_pdf_generator_kulupu_PdfBuilder_##name
 
 /* ------------------------------------------------------------------ */
 /* nativeStart                                                          */

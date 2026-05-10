@@ -5,30 +5,9 @@ import android.content.Context;
 import android.graphics.Bitmap;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 
-/**
- * PdfBuilder  (v2: VFS ストリーミング版)
- * <p>
- * PDF をメモリに溜めずキャッシュファイルに直接書き出す。
- * end() は出力ファイルの絶対パスを返す。
- * <p>
- * 使用例:
- * <pre>
- *   PdfBuilder builder = new PdfBuilder(context);
- *   try {
- *       builder.start("output_20240101.pdf");
- *       for (Bitmap bmp : bitmaps) {
- *           builder.appendImage(bmp, PdfBuilder.CHANNELS_GRAY, PdfBuilder.BPC_4);
- *           bmp.recycle();
- *       }
- *       String pdfPath = builder.end();
- *   } catch (Exception e) {
- *       builder.abort();
- *       throw e;
- *   }
- * </pre>
- */
 public class PdfBuilder{
     
     static{
@@ -53,19 +32,10 @@ public class PdfBuilder{
     private final String mRootPath;
     private long mCtx = 0L;
     
-    /**
-     * @param context アプリの Context。ルートパスとして getFilesDir() を使用する。
-     */
     public PdfBuilder(Context context){
         mRootPath = context.getFilesDir().getAbsolutePath();
     }
     
-    /**
-     * PDF 構築を開始する。
-     *
-     * @param fileName 出力ファイル名 (パス区切り文字を含まないこと)
-     *                 例: "output_20240101_120000.pdf"
-     */
     public void start(String fileName){
         if(mCtx != 0L) throw new IllegalStateException("already started");
         if(fileName == null || fileName.isEmpty())
@@ -74,13 +44,6 @@ public class PdfBuilder{
         if(mCtx == 0L) throw new RuntimeException("pdf_start() failed");
     }
     
-    /**
-     * 画像を1枚追加する。
-     *
-     * @param bitmap      追加する画像 (任意の Config)
-     * @param dstChannels 出力チャンネル数 ({@link #CHANNELS_GRAY} or {@link #CHANNELS_RGB})
-     * @param bitsPerCh   出力 bits/channel (1, 2, 4, 8)
-     */
     public void appendImage(Bitmap bitmap, int dstChannels, int bitsPerCh){
         if(mCtx == 0L) throw new IllegalStateException("not started");
         
@@ -88,23 +51,29 @@ public class PdfBuilder{
         int width = src.getWidth();
         int height = src.getHeight();
         
-        ByteBuffer bb = ByteBuffer.allocate(width * height * 4);
-        src.copyPixelsToBuffer(bb);
-        byte[] pixels = bb.array();
-        
+        /*
+         * getPixels() でストライド問題を回避する。
+         * 返り値は ARGB packed int (0xAARRGGBB)。
+         * C 側は RGB 3ch で受け取るので、ここで R/G/B を byte[] に展開する。
+         * Alpha は捨てる。
+         */
+        int[] argb = new int[width * height];
+        src.getPixels(argb, 0, width, 0, 0, width, height);
         if(src != bitmap) src.recycle();
         
-        int ret = nativeAppendImage(mCtx, pixels, width, height,
-                                    4, dstChannels, bitsPerCh);
+        byte[] rgb = new byte[width * height * 3];
+        for(int i = 0; i < argb.length; i++){
+            int px = argb[i];
+            rgb[i * 3] = (byte) ((px >> 16) & 0xFF); // R
+            rgb[i * 3 + 1] = (byte) ((px >> 8) & 0xFF); // G
+            rgb[i * 3 + 2] = (byte) (px & 0xFF); // B
+        }
+        
+        int ret = nativeAppendImage(mCtx, rgb, width, height,
+                                    3, dstChannels, bitsPerCh);
         checkError(ret, "appendImage");
     }
     
-    /**
-     * PDF を完成させてキャッシュファイルのパスを返す。
-     * 呼び出し後このインスタンスは再利用不可。
-     *
-     * @return 出力 PDF の絶対パス
-     */
     public String end(){
         if(mCtx == 0L) throw new IllegalStateException("not started");
         String path = nativeEnd(mCtx);
@@ -113,19 +82,12 @@ public class PdfBuilder{
         return path;
     }
     
-    /**
-     * エラー時クリーンアップ。キャッシュファイルも削除される。
-     * start() 後に例外が発生した場合は finally ブロックで呼ぶこと。
-     */
     public void abort(){
         if(mCtx == 0L) return;
         nativeAbort(mCtx);
         mCtx = 0L;
     }
     
-    /**
-     * キャッシュディレクトリのパスを返す
-     */
     public String getCacheDir(){
         return mRootPath + "/vfs_cache";
     }
