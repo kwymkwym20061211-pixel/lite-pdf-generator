@@ -27,41 +27,41 @@
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    size_t *offsets;
-    int     count;
-    int     cap;
+    size_t* offsets;
+    int count;
+    int cap;
 } ObjTable;
 
 typedef struct PageInfo {
     int page_obj;
     int img_obj;
     int cont_obj;
-    struct PageInfo *next;
+    struct PageInfo* next;
 } PageInfo;
 
 struct PdfCtx {
-    Vfs      *vfs;
-    ObjTable  objs;
-    PageInfo *pages_head;
-    PageInfo *pages_tail;
-    int       page_count;
-    int       catalog_obj;
-    int       pages_obj;
-    int       finished;
+    Vfs* vfs;
+    ObjTable objs;
+    PageInfo* pages_head;
+    PageInfo* pages_tail;
+    int page_count;
+    int catalog_obj;
+    int pages_obj;
+    int finished;
 };
 
 /* ------------------------------------------------------------------ */
 /* ObjTable                                                             */
 /* ------------------------------------------------------------------ */
 
-static int obj_reserve(ObjTable *t) {
+static int obj_reserve(ObjTable* t) {
     if (t->count >= t->cap) {
         int new_cap = t->cap ? t->cap * 2 : 64;
-        size_t *p = (size_t *)realloc(t->offsets,
-                                      (size_t)new_cap * sizeof(size_t));
+        size_t* p = (size_t*) realloc(t->offsets,
+                                      (size_t) new_cap * sizeof(size_t));
         if (!p) return -1;
         t->offsets = p;
-        t->cap     = new_cap;
+        t->cap = new_cap;
     }
     t->offsets[t->count] = 0;
     return ++t->count; /* 1-origin */
@@ -72,58 +72,202 @@ static int obj_reserve(ObjTable *t) {
 /* ------------------------------------------------------------------ */
 
 /* printf 風に書き込む。内部バッファ 512B 固定 (設計上超えない) */
-static PdfError vfs_printf(Vfs *vfs, const char *fmt, ...) {
+static PdfError vfs_printf(Vfs* vfs, const char* fmt, ...) {
     char tmp[512];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (n < 0 || (size_t)n >= sizeof(tmp)) return PDF_ERR_ALLOC;
-    VfsError e = vfs_write(vfs, tmp, (size_t)n);
+    if (n < 0 || (size_t) n >= sizeof(tmp)) return PDF_ERR_ALLOC;
+    VfsError e = vfs_write(vfs, tmp, (size_t) n);
     return (e == VFS_OK) ? PDF_OK : PDF_ERR_IO;
 }
 
 /* オブジェクト開始: xref オフセットを記録して "N 0 obj\n" を書く */
-static PdfError obj_begin(PdfCtx *ctx, int obj_no) {
+static PdfError obj_begin(PdfCtx* ctx, int obj_no) {
     assert(obj_no >= 1 && obj_no <= ctx->objs.count);
     ctx->objs.offsets[obj_no - 1] = vfs_tell(ctx->vfs);
     return vfs_printf(ctx->vfs, "%d 0 obj\n", obj_no);
 }
 
-static PdfError obj_end(Vfs *vfs) {
+static PdfError obj_end(Vfs* vfs) {
     VfsError e = vfs_write(vfs, "endobj\n\n", 8);
     return (e == VFS_OK) ? PDF_OK : PDF_ERR_IO;
 }
 
+
 /* ------------------------------------------------------------------ */
-/* ピクセル変換: モノクロ化 + 量子化 + ビットパッキング                 */
+/* 孤立クラスタ潰し                                                     */
 /* ------------------------------------------------------------------ */
 
-static uint8_t *convert_pixels(
-        const uint8_t *px,
+/*
+ * 量子化済みサンプル配列に対して孤立クラスタ潰しを適用する。
+ *
+ * 条件:
+ *   1. クラスタ内の全ピクセルが完全に同一色
+ *   2. クラスタを囲む隣接ピクセルが全て同一色かつクラスタ色と異なる
+ *      (画像端に接するクラスタは対象外)
+ *   3. クラスタのピクセル数 <= 7 (= 2^3 - 1, 3bit 分)
+ *
+ * 隣接: 上下左右のみ (斜め除外)
+ *
+ * visited, stack: 作業バッファ (呼び出し側が width*height 分確保すること)
+ */
+
+#define CRUSH_MAX_PX 7
+
+static void crush_isolated_clusters(
+        uint8_t* samples,
+        int width,
+        int height,
+        int ch,
+        uint8_t* visited,
+        int32_t* stack
+) {
+    memset(visited, 0, (size_t) width * (size_t) height);
+
+    const int dx[4] = {0, 0, -1, 1};
+    const int dy[4] = {-1, 1, 0, 0};
+
+    for (int sy = 0; sy < height; sy++) {
+        for (int sx = 0; sx < width; sx++) {
+            int seed = sy * width + sx;
+            if (visited[seed]) continue;
+
+            const uint8_t* seed_col = samples + (size_t) seed * ch;
+
+            int cluster_px = 0;
+            int stack_top = 0;
+            int too_large = 0;
+            int32_t cluster_buf[CRUSH_MAX_PX + 1];
+
+            stack[stack_top++] = seed;
+            visited[seed] = 1;
+
+            while (stack_top > 0) {
+                int32_t idx = stack[--stack_top];
+                int cx = idx % width;
+                int cy = idx / width;
+
+                const uint8_t* col = samples + (size_t) idx * ch;
+                int same = 1;
+                for (int c = 0; c < ch; c++) {
+                    if (col[c] != seed_col[c]) {
+                        same = 0;
+                        break;
+                    }
+                }
+                if (!same) {
+                    /* 色違い: visited を戻して別クラスタの seed になれるようにする */
+                    visited[idx] = 0;
+                    continue;
+                }
+
+                if (cluster_px <= CRUSH_MAX_PX) cluster_buf[cluster_px] = idx;
+                cluster_px++;
+                if (cluster_px > CRUSH_MAX_PX) too_large = 1;
+
+                for (int d = 0; d < 4; d++) {
+                    int nx = cx + dx[d];
+                    int ny = cy + dy[d];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    int nidx = ny * width + nx;
+                    if (visited[nidx]) continue;
+                    visited[nidx] = 1;
+                    stack[stack_top++] = nidx;
+                }
+            }
+
+            if (too_large) continue;
+
+            /* 周囲色チェック */
+            uint8_t surround_col[4] = {0};
+            int surround_found = 0;
+            int surround_ok = 1;
+
+            for (int pi = 0; pi < cluster_px && surround_ok; pi++) {
+                int32_t idx = cluster_buf[pi];
+                int cx = idx % width;
+                int cy = idx / width;
+
+                for (int d = 0; d < 4 && surround_ok; d++) {
+                    int nx = cx + dx[d];
+                    int ny = cy + dy[d];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                        surround_ok = 0;
+                        break;
+                    }
+                    int nidx = ny * width + nx;
+                    const uint8_t* ncol = samples + (size_t) nidx * ch;
+
+                    int in_cluster = 1;
+                    for (int c = 0; c < ch; c++) {
+                        if (ncol[c] != seed_col[c]) {
+                            in_cluster = 0;
+                            break;
+                        }
+                    }
+                    if (in_cluster) continue;
+
+                    if (!surround_found) {
+                        for (int c = 0; c < ch; c++) surround_col[c] = ncol[c];
+                        surround_found = 1;
+                    } else {
+                        for (int c = 0; c < ch; c++) {
+                            if (ncol[c] != surround_col[c]) {
+                                surround_ok = 0;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!surround_ok || !surround_found) continue;
+
+            int diff = 0;
+            for (int c = 0; c < ch; c++) {
+                if (surround_col[c] != seed_col[c]) {
+                    diff = 1;
+                    break;
+                }
+            }
+            if (!diff) continue;
+
+            for (int pi = 0; pi < cluster_px; pi++) {
+                uint8_t* dst = samples + (size_t) cluster_buf[pi] * ch;
+                for (int c = 0; c < ch; c++) dst[c] = surround_col[c];
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* ピクセル変換: モノクロ化 + 量子化 + 孤立クラスタ潰し + ビットパッキング */
+/* ------------------------------------------------------------------ */
+
+static uint8_t* convert_pixels(
+        const uint8_t* px,
         int width, int height,
         int src_ch, int dst_ch, int bpc,
-        size_t *out_size
+        size_t* out_size
 ) {
-    int px_per_row    = width * dst_ch;
+    int px_per_row = width * dst_ch;
     int bytes_per_row = (bpc >= 8)
                         ? px_per_row
                         : (px_per_row + (8 / bpc) - 1) / (8 / bpc);
 
-    size_t total = (size_t)bytes_per_row * (size_t)height;
-    uint8_t *out = (uint8_t *)calloc(total, 1);
-    if (!out) return NULL;
-    *out_size = total;
+    size_t n_samples = (size_t) width * (size_t) height * (size_t) dst_ch;
+
+    /* --- ステージ1: 量子化済みサンプルを中間バッファに書き出す --- */
+    uint8_t* samples = (uint8_t*) malloc(n_samples);
+    if (!samples) return NULL;
 
     int max_val = (1 << bpc) - 1;
 
     for (int y = 0; y < height; y++) {
-        const uint8_t *row_in  = px  + (size_t)y * width * src_ch;
-        uint8_t       *row_out = out + (size_t)y * bytes_per_row;
-
-        int bit_pos  = 8;
-        int byte_idx = 0;
-        uint8_t cur_byte = 0;
+        const uint8_t* row_in = px + (size_t) y * width * src_ch;
+        uint8_t* srow = samples + (size_t) y * width * dst_ch;
 
         for (int x = 0; x < width; x++) {
             uint8_t r, g, b;
@@ -142,21 +286,53 @@ static uint8_t *convert_pixels(
             for (int c = 0; c < dst_ch; c++) {
                 uint8_t ch_val;
                 if (dst_ch == 1) {
-                    /* ITU-R BT.709 輝度 (整数演算) */
-                    uint32_t lum = (uint32_t)r * 213u
-                                   + (uint32_t)g * 715u
-                                   + (uint32_t)b *  72u;
+                    uint32_t lum = (uint32_t) r * 213u
+                                   + (uint32_t) g * 715u
+                                   + (uint32_t) b * 72u;
                     ch_val = (uint8_t)((lum + 500u) / 1000u);
                 } else {
                     ch_val = (c == 0) ? r : (c == 1) ? g : b;
                 }
-
                 int q = (bpc >= 8)
                         ? ch_val
-                        : (int)(((uint32_t)ch_val * (uint32_t)max_val + 127u) / 255u);
+                        : (int) (((uint32_t) ch_val * (uint32_t) max_val + 127u) / 255u);
+                srow[x * dst_ch + c] = (uint8_t) q;
+            }
+        }
+    }
 
+    /* --- ステージ2: 孤立クラスタ潰し --- */
+    size_t npx = (size_t) width * (size_t) height;
+    uint8_t* visited = (uint8_t*) calloc(npx, 1);
+    int32_t* stk = (int32_t*) malloc(npx * sizeof(int32_t));
+    if (visited && stk) {
+        crush_isolated_clusters(samples, width, height, dst_ch, visited, stk);
+    }
+    free(visited);
+    free(stk);
+
+    /* --- ステージ3: ビットパッキング → 出力バッファ --- */
+    size_t total = (size_t) bytes_per_row * (size_t) height;
+    uint8_t* out = (uint8_t*) calloc(total, 1);
+    if (!out) {
+        free(samples);
+        return NULL;
+    }
+    *out_size = total;
+
+    for (int y = 0; y < height; y++) {
+        const uint8_t* srow = samples + (size_t) y * width * dst_ch;
+        uint8_t* row_out = out + (size_t) y * bytes_per_row;
+
+        int bit_pos = 8;
+        int byte_idx = 0;
+        uint8_t cur_byte = 0;
+
+        for (int x = 0; x < width; x++) {
+            for (int c = 0; c < dst_ch; c++) {
+                int q = srow[x * dst_ch + c];
                 if (bpc >= 8) {
-                    row_out[byte_idx++] = (uint8_t)q;
+                    row_out[byte_idx++] = (uint8_t) q;
                 } else {
                     if (bit_pos == 8) { cur_byte = 0; }
                     bit_pos -= bpc;
@@ -164,16 +340,15 @@ static uint8_t *convert_pixels(
                     if (bit_pos == 0) {
                         row_out[byte_idx++] = cur_byte;
                         cur_byte = 0;
-                        bit_pos  = 8;
+                        bit_pos = 8;
                     }
                 }
             }
         }
-        if (bpc < 8 && bit_pos < 8) {
-            row_out[byte_idx] = cur_byte;
-        }
+        if (bpc < 8 && bit_pos < 8) row_out[byte_idx] = cur_byte;
     }
 
+    free(samples);
     return out;
 }
 
@@ -181,14 +356,17 @@ static uint8_t *convert_pixels(
 /* zlib Flate 圧縮                                                      */
 /* ------------------------------------------------------------------ */
 
-static uint8_t *flate_compress(const uint8_t *src, size_t src_len,
-                               size_t *out_len) {
-    uLongf bound = compressBound((uLong)src_len);
-    uint8_t *dst = (uint8_t *)malloc(bound);
+static uint8_t* flate_compress(const uint8_t* src, size_t src_len,
+                               size_t* out_len) {
+    uLongf bound = compressBound((uLong) src_len);
+    uint8_t* dst = (uint8_t*) malloc(bound);
     if (!dst) return NULL;
-    int ret = compress2(dst, &bound, src, (uLong)src_len, Z_BEST_COMPRESSION);
-    if (ret != Z_OK) { free(dst); return NULL; }
-    *out_len = (size_t)bound;
+    int ret = compress2(dst, &bound, src, (uLong) src_len, Z_BEST_COMPRESSION);
+    if (ret != Z_OK) {
+        free(dst);
+        return NULL;
+    }
+    *out_len = (size_t) bound;
     return dst;
 }
 
@@ -197,14 +375,15 @@ static uint8_t *flate_compress(const uint8_t *src, size_t src_len,
 /* ------------------------------------------------------------------ */
 
 static PdfError write_image_obj(
-        PdfCtx *ctx, int img_obj,
+        PdfCtx* ctx, int img_obj,
         int width, int height, int dst_ch, int bpc,
-        const uint8_t *compressed, size_t compressed_len
+        const uint8_t* compressed, size_t compressed_len
 ) {
-    const char *cs = (dst_ch == 1) ? "/DeviceGray" : "/DeviceRGB";
+    const char* cs = (dst_ch == 1) ? "/DeviceGray" : "/DeviceRGB";
     PdfError e;
 
-    e = obj_begin(ctx, img_obj);               if (e) return e;
+    e = obj_begin(ctx, img_obj);
+    if (e) return e;
     e = vfs_printf(ctx->vfs,
                    "<<\n"
                    "/Type /XObject\n"
@@ -217,7 +396,8 @@ static PdfError write_image_obj(
                    "/Length %zu\n"
                    ">>\n"
                    "stream\n",
-                   width, height, cs, bpc, compressed_len); if (e) return e;
+                   width, height, cs, bpc, compressed_len);
+    if (e) return e;
 
     VfsError ve = vfs_write(ctx->vfs, compressed, compressed_len);
     if (ve != VFS_OK) return PDF_ERR_IO;
@@ -229,23 +409,24 @@ static PdfError write_image_obj(
 }
 
 static PdfError write_content_obj(
-        PdfCtx *ctx, int cont_obj, int img_obj,
+        PdfCtx* ctx, int cont_obj, int img_obj,
         int width, int height
 ) {
-    float page_h = PAGE_W_PT * (float)height / (float)width;
+    float page_h = PAGE_W_PT * (float) height / (float) width;
     char content[256];
     int n = snprintf(content, sizeof(content),
                      "q\n%.2f 0 0 %.2f 0 0 cm\n/Im%d Do\nQ\n",
                      PAGE_W_PT, page_h, img_obj);
-    if (n < 0 || (size_t)n >= sizeof(content)) return PDF_ERR_ALLOC;
+    if (n < 0 || (size_t) n >= sizeof(content)) return PDF_ERR_ALLOC;
 
     size_t comp_len;
-    uint8_t *comp = flate_compress((uint8_t *)content, (size_t)n, &comp_len);
+    uint8_t* comp = flate_compress((uint8_t*) content, (size_t) n, &comp_len);
     if (!comp) return PDF_ERR_COMPRESS;
 
     PdfError e = obj_begin(ctx, cont_obj);
-    if (!e) e = vfs_printf(ctx->vfs,
-                           "<<\n/Filter /FlateDecode\n/Length %zu\n>>\nstream\n", comp_len);
+    if (!e)
+        e = vfs_printf(ctx->vfs,
+                       "<<\n/Filter /FlateDecode\n/Length %zu\n>>\nstream\n", comp_len);
     if (!e) {
         VfsError ve = vfs_write(ctx->vfs, comp, comp_len);
         if (ve != VFS_OK) e = PDF_ERR_IO;
@@ -261,21 +442,22 @@ static PdfError write_content_obj(
 }
 
 static PdfError write_page_obj(
-        PdfCtx *ctx, int page_obj, int img_obj, int cont_obj,
+        PdfCtx* ctx, int page_obj, int img_obj, int cont_obj,
         int width, int height
 ) {
-    float page_h = PAGE_W_PT * (float)height / (float)width;
+    float page_h = PAGE_W_PT * (float) height / (float) width;
     PdfError e = obj_begin(ctx, page_obj);
-    if (!e) e = vfs_printf(ctx->vfs,
-                           "<<\n"
-                           "/Type /Page\n"
-                           "/Parent %d 0 R\n"
-                           "/MediaBox [0 0 %.2f %.2f]\n"
-                           "/Contents %d 0 R\n"
-                           "/Resources << /XObject << /Im%d %d 0 R >> >>\n"
-                           ">>\n",
-                           ctx->pages_obj, PAGE_W_PT, page_h,
-                           cont_obj, img_obj, img_obj);
+    if (!e)
+        e = vfs_printf(ctx->vfs,
+                       "<<\n"
+                       "/Type /Page\n"
+                       "/Parent %d 0 R\n"
+                       "/MediaBox [0 0 %.2f %.2f]\n"
+                       "/Contents %d 0 R\n"
+                       "/Resources << /XObject << /Im%d %d 0 R >> >>\n"
+                       ">>\n",
+                       ctx->pages_obj, PAGE_W_PT, page_h,
+                       cont_obj, img_obj, img_obj);
     if (!e) e = obj_end(ctx->vfs);
     return e;
 }
@@ -284,10 +466,10 @@ static PdfError write_page_obj(
 /* 公開 API                                                             */
 /* ------------------------------------------------------------------ */
 
-PdfCtx *pdf_start(Vfs *vfs) {
+PdfCtx* pdf_start(Vfs* vfs) {
     if (!vfs) return NULL;
 
-    PdfCtx *ctx = (PdfCtx *)calloc(1, sizeof(PdfCtx));
+    PdfCtx* ctx = (PdfCtx*) calloc(1, sizeof(PdfCtx));
     if (!ctx) return NULL;
     ctx->vfs = vfs;
 
@@ -295,52 +477,53 @@ PdfCtx *pdf_start(Vfs *vfs) {
     vfs_write(vfs, "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n", 14);
 
     ctx->catalog_obj = obj_reserve(&ctx->objs); /* =1 */
-    ctx->pages_obj   = obj_reserve(&ctx->objs); /* =2 */
+    ctx->pages_obj = obj_reserve(&ctx->objs); /* =2 */
 
     return ctx;
 }
 
 PdfError pdf_append_image(
-        PdfCtx        *ctx,
-        const uint8_t *px_data,
-        int            width,
-        int            height,
-        int            src_channels,
-        int            dst_channels,
-        int            bits_per_ch
+        PdfCtx* ctx,
+        const uint8_t* px_data,
+        int width,
+        int height,
+        int src_channels,
+        int dst_channels,
+        int bits_per_ch
 ) {
-    if (!ctx || ctx->finished)                        return PDF_ERR_STATE;
-    if (!px_data || width <= 0 || height <= 0)        return PDF_ERR_PARAM;
-    if (src_channels < 1 || src_channels > 4)         return PDF_ERR_PARAM;
-    if (dst_channels != 1 && dst_channels != 3)       return PDF_ERR_PARAM;
+    if (!ctx || ctx->finished) return PDF_ERR_STATE;
+    if (!px_data || width <= 0 || height <= 0) return PDF_ERR_PARAM;
+    if (src_channels < 1 || src_channels > 4) return PDF_ERR_PARAM;
+    if (dst_channels != 1 && dst_channels != 3) return PDF_ERR_PARAM;
     if (bits_per_ch != 1 && bits_per_ch != 2 &&
-        bits_per_ch != 4 && bits_per_ch != 8)         return PDF_ERR_PARAM;
+        bits_per_ch != 4 && bits_per_ch != 8)
+        return PDF_ERR_PARAM;
 
     int page_obj = obj_reserve(&ctx->objs);
-    int img_obj  = obj_reserve(&ctx->objs);
+    int img_obj = obj_reserve(&ctx->objs);
     int cont_obj = obj_reserve(&ctx->objs);
     if (page_obj < 0 || img_obj < 0 || cont_obj < 0) return PDF_ERR_ALLOC;
 
-    PageInfo *pi = (PageInfo *)calloc(1, sizeof(PageInfo));
+    PageInfo* pi = (PageInfo*) calloc(1, sizeof(PageInfo));
     if (!pi) return PDF_ERR_ALLOC;
     pi->page_obj = page_obj;
-    pi->img_obj  = img_obj;
+    pi->img_obj = img_obj;
     pi->cont_obj = cont_obj;
     if (ctx->pages_tail) ctx->pages_tail->next = pi;
-    else                 ctx->pages_head        = pi;
+    else ctx->pages_head = pi;
     ctx->pages_tail = pi;
     ctx->page_count++;
 
     /* 変換 */
-    size_t   raw_len;
-    uint8_t *raw = convert_pixels(px_data, width, height,
+    size_t raw_len;
+    uint8_t* raw = convert_pixels(px_data, width, height,
                                   src_channels, dst_channels, bits_per_ch,
                                   &raw_len);
     if (!raw) return PDF_ERR_ALLOC;
 
     /* 圧縮 */
-    size_t   comp_len;
-    uint8_t *comp = flate_compress(raw, raw_len, &comp_len);
+    size_t comp_len;
+    uint8_t* comp = flate_compress(raw, raw_len, &comp_len);
     free(raw);
     if (!comp) return PDF_ERR_COMPRESS;
 
@@ -357,19 +540,20 @@ PdfError pdf_append_image(
     return write_page_obj(ctx, page_obj, img_obj, cont_obj, width, height);
 }
 
-PdfError pdf_end(PdfCtx *ctx, Vfs **out_vfs) {
+PdfError pdf_end(PdfCtx* ctx, Vfs** out_vfs) {
     if (out_vfs) *out_vfs = NULL;
     if (!ctx || ctx->finished) return PDF_ERR_STATE;
     ctx->finished = 1;
 
-    Vfs *vfs = ctx->vfs;
+    Vfs* vfs = ctx->vfs;
     PdfError e = PDF_OK;
 
     /* Pages オブジェクト */
     if (!e) e = obj_begin(ctx, ctx->pages_obj);
-    if (!e) e = vfs_printf(vfs,
-                           "<<\n/Type /Pages\n/Count %d\n/Kids [", ctx->page_count);
-    for (PageInfo *pi = ctx->pages_head; pi && !e; pi = pi->next)
+    if (!e)
+        e = vfs_printf(vfs,
+                       "<<\n/Type /Pages\n/Count %d\n/Kids [", ctx->page_count);
+    for (PageInfo* pi = ctx->pages_head; pi && !e; pi = pi->next)
         e = vfs_printf(vfs, "%d 0 R ", pi->page_obj);
     if (!e) {
         VfsError ve = vfs_write(vfs, "]\n>>\n", 5);
@@ -379,8 +563,9 @@ PdfError pdf_end(PdfCtx *ctx, Vfs **out_vfs) {
 
     /* Catalog オブジェクト */
     if (!e) e = obj_begin(ctx, ctx->catalog_obj);
-    if (!e) e = vfs_printf(vfs,
-                           "<<\n/Type /Catalog\n/Pages %d 0 R\n>>\n", ctx->pages_obj);
+    if (!e)
+        e = vfs_printf(vfs,
+                       "<<\n/Type /Catalog\n/Pages %d 0 R\n>>\n", ctx->pages_obj);
     if (!e) e = obj_end(vfs);
 
     if (e) goto fail;
@@ -401,31 +586,39 @@ PdfError pdf_end(PdfCtx *ctx, Vfs **out_vfs) {
     }
 
     /* trailer */
-    if (!e) e = vfs_printf(vfs,
-                           "trailer\n<<\n/Size %d\n/Root %d 0 R\n>>\nstartxref\n%zu\n%%%%EOF\n",
-                           ctx->objs.count + 1, ctx->catalog_obj, xref_offset);
+    if (!e)
+        e = vfs_printf(vfs,
+                       "trailer\n<<\n/Size %d\n/Root %d 0 R\n>>\nstartxref\n%zu\n%%%%EOF\n",
+                       ctx->objs.count + 1, ctx->catalog_obj, xref_offset);
 
     if (e) goto fail;
 
     /* flush */
     {
         VfsError ve = vfs_flush(vfs);
-        if (ve != VFS_OK) { e = PDF_ERR_IO; goto fail; }
+        if (ve != VFS_OK) {
+            e = PDF_ERR_IO;
+            goto fail;
+        }
     }
 
     /* 正常終了: vfs を呼び出し側に返す */
     if (out_vfs) *out_vfs = vfs;
 
-    for (PageInfo *pi = ctx->pages_head; pi; ) {
-        PageInfo *next = pi->next; free(pi); pi = next;
+    for (PageInfo* pi = ctx->pages_head; pi;) {
+        PageInfo* next = pi->next;
+        free(pi);
+        pi = next;
     }
     free(ctx->objs.offsets);
     free(ctx);
     return PDF_OK;
 
     fail:
-    for (PageInfo *pi = ctx->pages_head; pi; ) {
-        PageInfo *next = pi->next; free(pi); pi = next;
+    for (PageInfo* pi = ctx->pages_head; pi;) {
+        PageInfo* next = pi->next;
+        free(pi);
+        pi = next;
     }
     free(ctx->objs.offsets);
     free(ctx);
@@ -433,11 +626,13 @@ PdfError pdf_end(PdfCtx *ctx, Vfs **out_vfs) {
     return e;
 }
 
-void pdf_abort(PdfCtx *ctx) {
+void pdf_abort(PdfCtx* ctx) {
     if (!ctx) return;
     vfs_abort(ctx->vfs);
-    for (PageInfo *pi = ctx->pages_head; pi; ) {
-        PageInfo *next = pi->next; free(pi); pi = next;
+    for (PageInfo* pi = ctx->pages_head; pi;) {
+        PageInfo* next = pi->next;
+        free(pi);
+        pi = next;
     }
     free(ctx->objs.offsets);
     free(ctx);
