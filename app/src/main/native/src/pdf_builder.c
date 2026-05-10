@@ -5,7 +5,7 @@
  * ObjTable (xref 用オフセット配列) だけメモリに保持する。
  */
 
-#include "pdf_builder.h"
+#include "../include/pdf_builder.h"
 
 #include <assert.h>
 #include <stdarg.h>

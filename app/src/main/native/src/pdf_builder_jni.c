@@ -16,8 +16,8 @@
  *   private native void   nativeAbort(long ctx);
  */
 
-#include "pdf_builder.h"
-#include "vfs.h"
+#include "../include/pdf_builder.h"
+#include "../include/vfs.h"
 
 #include <jni.h>
 #include <stdlib.h>

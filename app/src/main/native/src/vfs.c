@@ -7,7 +7,7 @@
  * Windows 移植例: open/write/fsync を CreateFile/WriteFile/FlushFileBuffers に置換。
  */
 
-#include "vfs.h"
+#include "../include/vfs.h"
 
 #include <errno.h>
 #include <fcntl.h>
