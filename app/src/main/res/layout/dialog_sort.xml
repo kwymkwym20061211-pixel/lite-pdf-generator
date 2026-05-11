@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp"
+    >
+    
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:text="並び替えキー"
+        android:textStyle="bold"
+        />
+    
+    <RadioGroup
+        android:id="@+id/rg_sort_key"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        >
+        
+        <RadioButton
+            android:id="@+id/rb_key_name"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="名前順 (Unicode)"
+            />
+        
+        <RadioButton
+            android:id="@+id/rb_key_number"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="数字順 (名前から数字を抽出)"
+            />
+        
+        <RadioButton
+            android:id="@+id/rb_key_date"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="作成日時順"
+            />
+    
+    </RadioGroup>
+    
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:text="順序"
+        android:textStyle="bold"
+        />
+    
+    <RadioGroup
+        android:id="@+id/rg_sort_order"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        >
+        
+        <RadioButton
+            android:id="@+id/rb_order_asc"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="昇順"
+            />
+        
+        <RadioButton
+            android:id="@+id/rb_order_desc"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="降順"
+            />
+    
+    </RadioGroup>
+
+</LinearLayout>

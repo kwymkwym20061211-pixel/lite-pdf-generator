@@ -1,13 +1,16 @@
 package light.pdf.generator.kulupu;
 
+
 import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.os.Handler;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Environment;
+import android.provider.DocumentsContract;
 import android.os.Bundle;
-import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.View;
@@ -31,39 +34,45 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends Activity {
+
+public class MainActivity extends Activity{
     
     private static final int REQ_PICK_IMAGES = 1;
+    private static final int REQ_PICK_DIR = 2;
     
-    private final List<Uri>                    mSelectedUris  = new ArrayList<>();
-    private       PdfBuilder.CropPoints[]      mCropPoints    = null; /* null=クロップ未設定 */
+    private final List<Uri> mSelectedUris = new ArrayList<>();
+    private PdfBuilder.CropPoints[] mCropPoints = null;
+    private ImageSorter.SortConfig mPendingSortConfig = null;
     
     private int mDstChannels = PdfBuilder.CHANNELS_GRAY;
-    private int mBitsPerCh   = PdfBuilder.BPC_4;
+    private int mBitsPerCh = PdfBuilder.BPC_4;
     
-    private TextView    mTvCount;
-    private Button      mBtnPick;
-    private Button      mBtnCrop;
-    private Button      mBtnGenerate;
+    private TextView mTvCount;
+    private Button mBtnPick;
+    // private Button      mBtnPickDir; /* ディレクトリ選択: 未実装 */
+    private Button mBtnCrop;
+    private Button mBtnGenerate;
     private ProgressBar mProgress;
-    private TextView    mTvStatus;
+    private TextView mTvStatus;
     
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
-    private final Handler         mMain     = new Handler(Looper.getMainLooper());
+    private final Handler mMain = new Handler(Looper.getMainLooper());
     
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    protected void onCreate(Bundle savedInstanceState){
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         
-        mTvCount     = findViewById(R.id.tv_count);
-        mBtnPick     = findViewById(R.id.btn_pick);
-        mBtnCrop     = findViewById(R.id.btn_crop);
+        mTvCount = findViewById(R.id.tv_count);
+        mBtnPick = findViewById(R.id.btn_pick);
+        // mBtnPickDir  = findViewById(R.id.btn_pick_dir);
+        mBtnCrop = findViewById(R.id.btn_crop);
         mBtnGenerate = findViewById(R.id.btn_generate);
-        mProgress    = findViewById(R.id.progress);
-        mTvStatus    = findViewById(R.id.tv_status);
+        mProgress = findViewById(R.id.progress);
+        mTvStatus = findViewById(R.id.tv_status);
         
         mBtnPick.setOnClickListener(v -> pickImages());
+        // mBtnPickDir.setOnClickListener(v -> pickDirectory());
         mBtnCrop.setOnClickListener(v -> openCrop());
         
         Spinner spinnerMode = findViewById(R.id.spinner_mode);
@@ -72,11 +81,14 @@ public class MainActivity extends Activity {
                 new String[]{"グレースケール", "カラー (RGB)"});
         modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerMode.setAdapter(modeAdapter);
-        spinnerMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+        spinnerMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id){
                 mDstChannels = (pos == 0) ? PdfBuilder.CHANNELS_GRAY : PdfBuilder.CHANNELS_RGB;
             }
-            @Override public void onNothingSelected(AdapterView<?> p) {}
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> p){}
         });
         
         Spinner spinnerBpc = findViewById(R.id.spinner_bpc);
@@ -86,12 +98,16 @@ public class MainActivity extends Activity {
         bpcAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerBpc.setAdapter(bpcAdapter);
         spinnerBpc.setSelection(2);
-        spinnerBpc.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+        spinnerBpc.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){
             private final int[] BPC = {1, 2, 4, 8};
-            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+            
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id){
                 mBitsPerCh = BPC[pos];
             }
-            @Override public void onNothingSelected(AdapterView<?> p) {}
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> p){}
         });
         
         mBtnGenerate.setOnClickListener(v -> startGenerate());
@@ -102,26 +118,68 @@ public class MainActivity extends Activity {
     /* 画像選択                                                           */
     /* ---------------------------------------------------------------- */
     
-    private void pickImages() {
+    private void pickImages(){
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.setType("image/*");
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(Intent.createChooser(intent, "画像を選択"), REQ_PICK_IMAGES);
     }
     
+    private void pickDirectory(){
+        DirectorySortDialog.newInstance(cfg -> {
+            /* ソート設定を保持してディレクトリ選択を起動 */
+            mPendingSortConfig = cfg;
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            if(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O){
+                Uri initialUri = DocumentsContract.buildRootUri(
+                        "com.android.externalstorage.documents", "primary");
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri);
+            }
+            startActivityForResult(intent, REQ_PICK_DIR);
+        }).show(getFragmentManager(), "sort");
+    }
+    
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    protected void onActivityResult(int requestCode, int resultCode, Intent data){
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_PICK_IMAGES || resultCode != RESULT_OK || data == null) return;
+        
+        if(requestCode == REQ_PICK_DIR && resultCode == RESULT_OK && data != null){
+            Uri treeUri = data.getData();
+            ImageSorter.SortConfig cfg = mPendingSortConfig;
+            mPendingSortConfig = null;
+            if(treeUri == null || cfg == null) return;
+            /* パーミッションを永続化しないと ContentResolver.query が空を返す */
+            getContentResolver().takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                                             );
+            /* バックグラウンドでディレクトリを列挙してリストに追加 */
+            mExecutor.execute(() -> {
+                List<Uri> uris = ImageSorter.listSorted(this, treeUri, cfg);
+                mMain.post(() -> {
+                    mSelectedUris.addAll(uris);
+                    mCropPoints = null;
+                    updateCount();
+                    if(uris.isEmpty()){
+                        android.widget.Toast.makeText(this,
+                                                      "画像が見つかりませんでした",
+                                                      android.widget.Toast.LENGTH_SHORT).show();
+                    }
+                });
+            });
+            return;
+        }
+        
+        if(requestCode != REQ_PICK_IMAGES || resultCode != RESULT_OK || data == null) return;
         
         mSelectedUris.clear();
         mCropPoints = null; /* 画像が変わったのでクロップをリセット */
         
-        if (data.getClipData() != null) {
+        if(data.getClipData() != null){
             int count = data.getClipData().getItemCount();
-            for (int i = 0; i < count; i++)
+            for(int i = 0; i < count; i++)
                 mSelectedUris.add(data.getClipData().getItemAt(i).getUri());
-        } else if (data.getData() != null) {
+        } else if(data.getData() != null){
             mSelectedUris.add(data.getData());
         }
         updateCount();
@@ -131,8 +189,8 @@ public class MainActivity extends Activity {
     /* クロップ設定                                                       */
     /* ---------------------------------------------------------------- */
     
-    private void openCrop() {
-        if (mSelectedUris.isEmpty()) {
+    private void openCrop(){
+        if(mSelectedUris.isEmpty()){
             Toast.makeText(this, "先に画像を選択してください", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -157,8 +215,8 @@ public class MainActivity extends Activity {
     /* PDF 生成                                                           */
     /* ---------------------------------------------------------------- */
     
-    private void startGenerate() {
-        if (mSelectedUris.isEmpty()) {
+    private void startGenerate(){
+        if(mSelectedUris.isEmpty()){
             Toast.makeText(this, "画像を選択してください", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -168,10 +226,10 @@ public class MainActivity extends Activity {
         mProgress.setVisibility(View.VISIBLE);
         mTvStatus.setText("変換中…");
         
-        List<Uri>                   uris   = new ArrayList<>(mSelectedUris);
-        PdfBuilder.CropPoints[]     crops  = mCropPoints; /* null でも可 */
-        int                         dstCh  = mDstChannels;
-        int                         bpc    = mBitsPerCh;
+        List<Uri> uris = new ArrayList<>(mSelectedUris);
+        PdfBuilder.CropPoints[] crops = mCropPoints; /* null でも可 */
+        int dstCh = mDstChannels;
+        int bpc = mBitsPerCh;
         String fileName = "board_"
                           + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date())
                           + ".pdf";
@@ -180,13 +238,13 @@ public class MainActivity extends Activity {
     }
     
     private void generate(List<Uri> uris, PdfBuilder.CropPoints[] crops,
-                          int dstCh, int bpc, String fileName) {
+                          int dstCh, int bpc, String fileName){
         PdfBuilder builder = new PdfBuilder(this);
-        try {
+        try{
             builder.start(fileName);
-            for (int i = 0; i < uris.size(); i++) {
+            for(int i = 0; i < uris.size(); i++){
                 Bitmap bmp = decodeBitmap(uris.get(i));
-                if (bmp == null) throw new RuntimeException("画像の読み込み失敗: " + uris.get(i));
+                if(bmp == null) throw new RuntimeException("画像の読み込み失敗: " + uris.get(i));
                 
                 PdfBuilder.CropPoints crop = (crops != null) ? crops[i] : null;
                 builder.appendImage(bmp, dstCh, bpc, crop);
@@ -198,36 +256,36 @@ public class MainActivity extends Activity {
             String cachePath = builder.end();
             String savedName = saveToDownloads(cachePath, fileName);
             mMain.post(() -> onSuccess(savedName));
-        } catch (Exception e) {
+        } catch(Exception e){
             builder.abort();
             mMain.post(() -> onFailure(e.getMessage()));
         }
     }
     
-    private Bitmap decodeBitmap(Uri uri) {
-        try (InputStream is = getContentResolver().openInputStream(uri)) {
-            if (is == null) return null;
+    private Bitmap decodeBitmap(Uri uri){
+        try(InputStream is = getContentResolver().openInputStream(uri)){
+            if(is == null) return null;
             BitmapFactory.Options opts = new BitmapFactory.Options();
             opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
             return BitmapFactory.decodeStream(is, null, opts);
-        } catch (Exception e) {
+        } catch(Exception e){
             return null;
         }
     }
     
-    private String saveToDownloads(String cachePath, String fileName) throws Exception {
+    private String saveToDownloads(String cachePath, String fileName) throws Exception{
         ContentValues cv = new ContentValues();
         cv.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
         cv.put(MediaStore.Downloads.MIME_TYPE, "application/pdf");
-        Uri col     = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        Uri col = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
         Uri itemUri = getContentResolver().insert(col, cv);
-        if (itemUri == null) throw new RuntimeException("MediaStore insert 失敗");
-        try (FileInputStream in  = new FileInputStream(new File(cachePath));
-             OutputStream    out = getContentResolver().openOutputStream(itemUri)) {
-            if (out == null) throw new RuntimeException("OutputStream が null");
+        if(itemUri == null) throw new RuntimeException("MediaStore insert 失敗");
+        try(FileInputStream in = new FileInputStream(new File(cachePath));
+            OutputStream out = getContentResolver().openOutputStream(itemUri)){
+            if(out == null) throw new RuntimeException("OutputStream が null");
             byte[] buf = new byte[65536];
             int n;
-            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            while((n = in.read(buf)) != -1) out.write(buf, 0, n);
         }
         new File(cachePath).delete();
         return fileName;
@@ -237,35 +295,37 @@ public class MainActivity extends Activity {
     /* UI 更新                                                            */
     /* ---------------------------------------------------------------- */
     
-    private void onSuccess(String fileName) {
+    private void onSuccess(String fileName){
         mProgress.setVisibility(View.GONE);
         mTvStatus.setText("保存しました: " + fileName);
         setUiEnabled(true);
         Toast.makeText(this, "ダウンロードに保存しました", Toast.LENGTH_LONG).show();
     }
     
-    private void onFailure(String msg) {
+    private void onFailure(String msg){
         mProgress.setVisibility(View.GONE);
         mTvStatus.setText("エラー: " + msg);
         setUiEnabled(true);
     }
     
-    private void setUiEnabled(boolean enabled) {
+    private void setUiEnabled(boolean enabled){
         mBtnPick.setEnabled(enabled);
+        // mBtnPickDir.setEnabled(enabled);
         mBtnCrop.setEnabled(enabled && !mSelectedUris.isEmpty());
         mBtnGenerate.setEnabled(enabled && !mSelectedUris.isEmpty());
     }
     
-    private void updateCount() {
+    private void updateCount(){
         int n = mSelectedUris.size();
         mTvCount.setText(n == 0 ? "画像未選択" : n + " 枚選択中"
-                                                 + (mCropPoints != null ? " (クロップ設定済)" : ""));
+                                                 +
+                                                 (mCropPoints != null ? " (クロップ設定済)" : ""));
         mBtnCrop.setEnabled(n > 0);
         mBtnGenerate.setEnabled(n > 0);
     }
     
     @Override
-    protected void onDestroy() {
+    protected void onDestroy(){
         super.onDestroy();
         mExecutor.shutdownNow();
     }
