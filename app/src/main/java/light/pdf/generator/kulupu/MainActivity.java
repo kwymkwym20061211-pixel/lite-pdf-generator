@@ -42,6 +42,7 @@ public class MainActivity extends Activity{
     
     private final List<Uri> mSelectedUris = new ArrayList<>();
     private PdfBuilder.CropPoints[] mCropPoints = null;
+    private int[] mRotations = null;
     private ImageSorter.SortConfig mPendingSortConfig = null;
     
     private int mDstChannels = PdfBuilder.CHANNELS_GRAY;
@@ -173,7 +174,8 @@ public class MainActivity extends Activity{
         if(requestCode != REQ_PICK_IMAGES || resultCode != RESULT_OK || data == null) return;
         
         mSelectedUris.clear();
-        mCropPoints = null; /* 画像が変わったのでクロップをリセット */
+        mCropPoints = null;
+        mRotations  = null;
         
         if(data.getClipData() != null){
             int count = data.getClipData().getItemCount();
@@ -198,8 +200,11 @@ public class MainActivity extends Activity{
         CropFragment fragment = CropFragment.newInstance(
                 new ArrayList<>(mSelectedUris),
                 mCropPoints,
-                results -> {
-                    mCropPoints = results;
+                (uris, results, rotations) -> {
+                    mSelectedUris.clear();
+                    mSelectedUris.addAll(uris);
+                    mCropPoints = results.length > 0 ? results : null;
+                    mRotations  = rotations.length > 0 ? rotations : null;
                     updateCount();
                     Toast.makeText(this, "クロップ設定を保存しました", Toast.LENGTH_SHORT).show();
                 }
@@ -228,23 +233,25 @@ public class MainActivity extends Activity{
         mTvStatus.setText("変換中…");
         
         List<Uri> uris = new ArrayList<>(mSelectedUris);
-        PdfBuilder.CropPoints[] crops = mCropPoints; /* null でも可 */
+        PdfBuilder.CropPoints[] crops = mCropPoints;
+        int[] rots = mRotations;
         int dstCh = mDstChannels;
         int bpc = mBitsPerCh;
         String fileName = "board_"
                           + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date())
                           + ".pdf";
-        
-        mExecutor.execute(() -> generate(uris, crops, dstCh, bpc, fileName));
+
+        mExecutor.execute(() -> generate(uris, crops, rots, dstCh, bpc, fileName));
     }
     
     private void generate(List<Uri> uris, PdfBuilder.CropPoints[] crops,
-                          int dstCh, int bpc, String fileName){
+                          int[] rotations, int dstCh, int bpc, String fileName){
         PdfBuilder builder = new PdfBuilder(this);
         try{
             builder.start(fileName);
             for(int i = 0; i < uris.size(); i++){
-                Bitmap bmp = decodeBitmap(uris.get(i));
+                int rot = (rotations != null && i < rotations.length) ? rotations[i] : -1;
+                Bitmap bmp = decodeBitmap(uris.get(i), rot);
                 if(bmp == null) throw new RuntimeException("画像の読み込み失敗: " + uris.get(i));
                 
                 PdfBuilder.CropPoints crop = (crops != null) ? crops[i] : null;
@@ -263,12 +270,43 @@ public class MainActivity extends Activity{
         }
     }
     
-    private Bitmap decodeBitmap(Uri uri){
-        try(InputStream is = getContentResolver().openInputStream(uri)){
-            if(is == null) return null;
-            BitmapFactory.Options opts = new BitmapFactory.Options();
-            opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            return BitmapFactory.decodeStream(is, null, opts);
+    private Bitmap decodeBitmap(Uri uri, int totalRotation){
+        try{
+            Bitmap bmp;
+            try(InputStream is = getContentResolver().openInputStream(uri)){
+                if(is == null) return null;
+                BitmapFactory.Options opts = new BitmapFactory.Options();
+                opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                bmp = BitmapFactory.decodeStream(is, null, opts);
+            }
+            if(bmp == null) return null;
+
+            int degrees = 0;
+            if(totalRotation < 0){
+                /* クロップ画面を通っていない場合は EXIF を直接読む */
+                try(InputStream is2 = getContentResolver().openInputStream(uri)){
+                    if(is2 == null){ degrees = 0; }
+                    else{
+                        android.media.ExifInterface exif = new android.media.ExifInterface(is2);
+                        switch(exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION,
+                                                    android.media.ExifInterface.ORIENTATION_NORMAL)){
+                            case android.media.ExifInterface.ORIENTATION_ROTATE_90:  degrees = 90;  break;
+                            case android.media.ExifInterface.ORIENTATION_ROTATE_180: degrees = 180; break;
+                            case android.media.ExifInterface.ORIENTATION_ROTATE_270: degrees = 270; break;
+                            default: degrees = 0;
+                        }
+                    }
+                }
+            } else {
+                degrees = totalRotation;
+            }
+
+            if(degrees % 360 == 0) return bmp;
+            android.graphics.Matrix m = new android.graphics.Matrix();
+            m.postRotate(degrees);
+            Bitmap rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
+            bmp.recycle();
+            return rotated;
         } catch(Exception e){
             return null;
         }
