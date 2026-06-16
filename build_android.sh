@@ -30,6 +30,9 @@ echo -n "Install to device?(y/n) "
 read install
 if [ "$install" = "y" ]; then
     INSTALL_TASK="install${BUILD_TYPE^}"
+    APP_ID="light.pdf.generator.kulupu"
+    echo "Uninstalling existing app..."
+    adb uninstall "$APP_ID" 2>/dev/null || true
     echo "Installing..."
     if ./gradlew "$INSTALL_TASK"; then
         echo "Install successful!"

@@ -50,6 +50,7 @@ public class MainActivity extends Activity{
     
     private TextView mTvCount;
     private Button mBtnPick;
+    private Button mBtnClear;
     // private Button      mBtnPickDir; /* ディレクトリ選択: 未実装 */
     private Button mBtnCrop;
     private Button mBtnGenerate;
@@ -66,13 +67,15 @@ public class MainActivity extends Activity{
         
         mTvCount = findViewById(R.id.tv_count);
         mBtnPick = findViewById(R.id.btn_pick);
+        mBtnClear = findViewById(R.id.btn_clear);
         // mBtnPickDir  = findViewById(R.id.btn_pick_dir);
         mBtnCrop = findViewById(R.id.btn_crop);
         mBtnGenerate = findViewById(R.id.btn_generate);
         mProgress = findViewById(R.id.progress);
         mTvStatus = findViewById(R.id.tv_status);
-        
+
         mBtnPick.setOnClickListener(v -> pickImages());
+        mBtnClear.setOnClickListener(v -> clearSelection());
         // mBtnPickDir.setOnClickListener(v -> pickDirectory());
         mBtnCrop.setOnClickListener(v -> openCrop());
         
@@ -119,6 +122,13 @@ public class MainActivity extends Activity{
     /* 画像選択                                                           */
     /* ---------------------------------------------------------------- */
     
+    private void clearSelection(){
+        mSelectedUris.clear();
+        mCropPoints = null;
+        mRotations  = null;
+        updateCount();
+    }
+
     private void pickImages(){
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.setType("image/*");
@@ -360,15 +370,17 @@ public class MainActivity extends Activity{
     private void setUiEnabled(boolean enabled){
         mBtnPick.setEnabled(enabled);
         // mBtnPickDir.setEnabled(enabled);
+        mBtnClear.setEnabled(enabled && !mSelectedUris.isEmpty());
         mBtnCrop.setEnabled(enabled && !mSelectedUris.isEmpty());
         mBtnGenerate.setEnabled(enabled && !mSelectedUris.isEmpty());
     }
-    
+
     private void updateCount(){
         int n = mSelectedUris.size();
         mTvCount.setText(n == 0 ? "画像未選択" : n + " 枚選択中"
                                                  +
                                                  (mCropPoints != null ? " (クロップ設定済)" : ""));
+        mBtnClear.setEnabled(n > 0);
         mBtnCrop.setEnabled(n > 0);
         mBtnGenerate.setEnabled(n > 0);
     }
