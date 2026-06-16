@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(xargs cat)"
+      "Bash(xargs cat)",
+      "Bash(find /home/user/dev/boem-conlang-studio -name \"build_android*\" 2>/dev/null)",
+      "Read(//home/user/dev/boem-conlang-studio/**)"
     ]
   }
 }
