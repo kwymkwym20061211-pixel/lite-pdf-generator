@@ -26,6 +26,7 @@ public class CropFragment extends Fragment{
     private static final float[] ZOOM_LEVELS = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
     
     private List<Uri> mUris;
+    private PdfBuilder.CropPoints[] mExistingCropPoints;
     private OnCropDoneListener mListener;
     
     private CropView mCropView;
@@ -40,9 +41,10 @@ public class CropFragment extends Fragment{
     /* フルサイズの画像サイズ (クロップ座標をスケール戻しするため) */
     private int[] mFullW, mFullH;
     
-    public static CropFragment newInstance(List<Uri> uris, OnCropDoneListener listener){
+    public static CropFragment newInstance(List<Uri> uris, PdfBuilder.CropPoints[] existing, OnCropDoneListener listener){
         CropFragment f = new CropFragment();
         f.mUris = uris;
+        f.mExistingCropPoints = existing;
         f.mListener = listener;
         return f;
     }
@@ -68,6 +70,10 @@ public class CropFragment extends Fragment{
         };
         
         mResults = new PdfBuilder.CropPoints[mUris.size()];
+        if(mExistingCropPoints != null){
+            int len = Math.min(mExistingCropPoints.length, mResults.length);
+            System.arraycopy(mExistingCropPoints, 0, mResults, 0, len);
+        }
         mFullW = new int[mUris.size()];
         mFullH = new int[mUris.size()];
         
@@ -159,7 +165,20 @@ public class CropFragment extends Fragment{
         
         mCropView.setBitmap(mCurrentBitmap);
         mCropView.setZoomMultiplier(ZOOM_LEVELS[mZoomIndex]);
-        mCropView.resetPoints();
+
+        PdfBuilder.CropPoints saved = mResults[index];
+        if(saved != null && mCurrentBitmap != null && mFullW[index] > 0){
+            float sx = (float) mCurrentBitmap.getWidth() / mFullW[index];
+            float sy = (float) mCurrentBitmap.getHeight() / mFullH[index];
+            float[] px = new float[4], py = new float[4];
+            for(int i = 0; i < 4; i++){
+                px[i] = saved.x[i] * sx;
+                py[i] = saved.y[i] * sy;
+            }
+            mCropView.setPoints(px, py);
+        } else {
+            mCropView.resetPoints();
+        }
         
         updateNavButtons();
         updateZoomButtons();

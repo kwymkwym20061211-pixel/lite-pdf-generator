@@ -108,6 +108,13 @@ public class CropView extends View{
         mPointsInitialized = true;
         invalidate();
     }
+
+    public void setPoints(float[] px, float[] py){
+        System.arraycopy(px, 0, mPx, 0, 4);
+        System.arraycopy(py, 0, mPy, 0, 4);
+        mPointsInitialized = true;
+        invalidate();
+    }
     
     public PdfBuilder.CropPoints getCropPoints(){
         if(mBitmap == null) return null;

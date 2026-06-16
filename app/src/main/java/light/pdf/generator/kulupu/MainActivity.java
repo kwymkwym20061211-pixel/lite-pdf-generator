@@ -197,6 +197,7 @@ public class MainActivity extends Activity{
         
         CropFragment fragment = CropFragment.newInstance(
                 new ArrayList<>(mSelectedUris),
+                mCropPoints,
                 results -> {
                     mCropPoints = results;
                     updateCount();
