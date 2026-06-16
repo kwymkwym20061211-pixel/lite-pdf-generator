@@ -23,6 +23,16 @@ import android.app.AlertDialog;
 
 public class CropFragment extends Fragment{
     
+    /**
+     * クロップ画面の確定コールバック。「完了」ボタンでのみ呼ばれる。「✕」では呼ばれない。
+     *
+     * <p>{@code rotations[i]} は EXIF + ユーザー手動回転の合計角度 (0/90/180/270)。
+     * クロップ画面でその画像を一度も表示しなかった場合は -1 のまま渡る。
+     * 受け取り側は -1 の場合に自分で EXIF を読むこと。</p>
+     *
+     * <p>{@code results[i]} の座標は「回転後フルサイズ」座標系。
+     * PDF 生成時は回転適用済み Bitmap に対してクロップを適用すること。</p>
+     */
     public interface OnCropDoneListener{
         void onCropDone(List<Uri> uris, PdfBuilder.CropPoints[] results, int[] rotations);
     }
@@ -44,9 +54,15 @@ public class CropFragment extends Fragment{
     private int mZoomIndex = 0;
     private PdfBuilder.CropPoints[] mResults;
     private Bitmap mCurrentBitmap;
-    /* 生ファイル寸法 (回転前) */
+    /*
+     * mFileW/mFileH: ファイルから読んだ生寸法 (回転前)。
+     * 90°/270° 回転後の実効寸法は effectiveW/H() で取得すること。
+     * CropView が扱う座標は「回転済みプレビュー Bitmap」上の座標であり、
+     * mResults に保存する座標は「回転済みフルサイズ」座標である。
+     * この2種類の座標を混同しないこと。
+     */
     private int[] mFileW, mFileH;
-    /* 合計回転角度 (EXIF + ユーザー操作)。-1 = 未読 */
+    /* EXIF + ユーザー手動回転の合計 (度)。-1 = その画像をまだ表示していないため未読 */
     private int[] mRotation;
     
     public static CropFragment newInstance(List<Uri> uris, PdfBuilder.CropPoints[] existing, OnCropDoneListener listener){
@@ -90,6 +106,7 @@ public class CropFragment extends Fragment{
         mRotation = new int[mUris.size()];
         Arrays.fill(mRotation, -1);
         
+        /* ✕ はコールバックを呼ばずに閉じる → MainActivity の状態は変わらない (削除も無効) */
         mBtnBack.setOnClickListener(vv -> {
             if(mCurrentBitmap != null) mCurrentBitmap.recycle();
             getFragmentManager().beginTransaction().remove(this).commit();
@@ -136,8 +153,11 @@ public class CropFragment extends Fragment{
         PdfBuilder.CropPoints cp = mCropView.getCropPoints();
         if(cp == null) return;
         
-        /* CropView はプレビュー縮小 Bitmap 上の座標を返すので
-         * フルサイズ (回転後) にスケールアップして保存する */
+        /*
+         * CropView の座標系 = 「回転済みプレビュー Bitmap」ピクセル座標。
+         * mResults に保存する座標系 = 「回転済みフルサイズ」ピクセル座標。
+         * effectiveW/H は 90°/270° 時に mFileW と mFileH を入れ替えて返す。
+         */
         if(mCurrentBitmap != null && effectiveW(mCurrentIndex) > 0){
             float sx = (float) effectiveW(mCurrentIndex) / mCurrentBitmap.getWidth();
             float sy = (float) effectiveH(mCurrentIndex) / mCurrentBitmap.getHeight();
@@ -191,6 +211,7 @@ public class CropFragment extends Fragment{
         mCropView.setBitmap(mCurrentBitmap);
         mCropView.setZoomMultiplier(ZOOM_LEVELS[mZoomIndex]);
 
+        /* saveCurrent() の逆: フルサイズ座標 → プレビュー座標にスケールダウンして CropView に渡す */
         PdfBuilder.CropPoints saved = mResults[index];
         if(saved != null && mCurrentBitmap != null && effectiveW(index) > 0){
             float sx = (float) mCurrentBitmap.getWidth() / effectiveW(index);
@@ -266,19 +287,26 @@ public class CropFragment extends Fragment{
     private void rotateCurrent(int delta){
         mRotation[mCurrentIndex] = (mRotation[mCurrentIndex] + delta + 360) % 360;
         Bitmap rotated = applyRotation(mCurrentBitmap, delta);
-        /* applyRotation は新 Bitmap を生成するので古いものを解放 */
-        if(rotated != mCurrentBitmap) mCurrentBitmap.recycle();
+        if(rotated != mCurrentBitmap) mCurrentBitmap.recycle(); // applyRotation は新 Bitmap を返す
         mCurrentBitmap = rotated;
         mCropView.setBitmap(mCurrentBitmap);
         mCropView.resetPoints();
-        /* 保存済みクロップは回転後の座標系と合わなくなるので破棄 */
+        /*
+         * 保存済みクロップ座標は回転前の座標系で記録されているため、
+         * 回転後に再利用すると正しい位置を指さない。破棄してリセットする。
+         */
         mResults[mCurrentIndex] = null;
     }
 
+    /**
+     * 回転適用後の画像幅。90°/270° 回転時は W と H が入れ替わるため mFileH を返す。
+     * saveCurrent() と loadImage() のスケール計算で必ず使うこと。直接 mFileW を参照しないこと。
+     */
     private int effectiveW(int idx){
         return (mRotation[idx] % 180 == 0) ? mFileW[idx] : mFileH[idx];
     }
 
+    /** 回転適用後の画像高さ。effectiveW() と対になる。 */
     private int effectiveH(int idx){
         return (mRotation[idx] % 180 == 0) ? mFileH[idx] : mFileW[idx];
     }

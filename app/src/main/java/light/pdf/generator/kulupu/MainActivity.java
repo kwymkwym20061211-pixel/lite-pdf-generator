@@ -255,6 +255,7 @@ public class MainActivity extends Activity{
                 if(bmp == null) throw new RuntimeException("画像の読み込み失敗: " + uris.get(i));
                 
                 PdfBuilder.CropPoints crop = (crops != null) ? crops[i] : null;
+                /* bmp は decodeBitmap() で既に正立済み。crop 座標も正立後の座標系 */
                 builder.appendImage(bmp, dstCh, bpc, crop);
                 bmp.recycle();
                 
@@ -270,6 +271,15 @@ public class MainActivity extends Activity{
         }
     }
     
+    /**
+     * 画像をデコードして回転済み Bitmap を返す。
+     *
+     * <p>{@code totalRotation} は CropFragment から受け取った合計回転角度 (EXIF + 手動)。
+     * -1 の場合はクロップ画面でその画像を表示していないため、ここで EXIF を直接読んで適用する。
+     * 0 以上の場合は既に合計値なので EXIF を再読しない (二重適用防止)。</p>
+     *
+     * <p>C コアは回転を行わないため、このメソッドが返す Bitmap は必ず正立していること。</p>
+     */
     private Bitmap decodeBitmap(Uri uri, int totalRotation){
         try{
             Bitmap bmp;

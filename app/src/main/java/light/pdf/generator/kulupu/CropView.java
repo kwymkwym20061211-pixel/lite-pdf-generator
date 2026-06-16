@@ -109,13 +109,21 @@ public class CropView extends View{
         invalidate();
     }
 
+    /**
+     * 保存済み座標を復元する。座標はプレビュー Bitmap ピクセル座標であること。
+     * フルサイズ座標をそのまま渡すと表示が壊れる (CropFragment.loadImage() でスケール変換してから呼ぶ)。
+     */
     public void setPoints(float[] px, float[] py){
         System.arraycopy(px, 0, mPx, 0, 4);
         System.arraycopy(py, 0, mPy, 0, 4);
         mPointsInitialized = true;
         invalidate();
     }
-    
+
+    /**
+     * 現在の4点座標をプレビュー Bitmap ピクセル座標で返す。
+     * フルサイズ座標に変換するには CropFragment.saveCurrent() の scale 処理が必要。
+     */
     public PdfBuilder.CropPoints getCropPoints(){
         if(mBitmap == null) return null;
         PdfBuilder.CropPoints cp = new PdfBuilder.CropPoints();
